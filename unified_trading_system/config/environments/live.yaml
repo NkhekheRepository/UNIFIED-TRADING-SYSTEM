@@ -1,0 +1,20 @@
+# Live Environment Configuration
+# Overrides for live trading environment
+
+binance:
+  base_url: "https://testnet.binancefuture.com"
+
+trading:
+  mode: "LIVE"
+  # Conservative settings for live trading - adjust based on your capital
+  max_position_size: 0.05
+  max_daily_loss: 5000.0
+  max_orders_per_minute: 20
+
+logging:
+  log_dir: "logs/live"
+  log_level: "INFO"
+
+observability:
+  health_check_port: 8082
+  metrics_port: 9092
