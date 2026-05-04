@@ -16,6 +16,7 @@ duplicate field definitions that caused `SyntaxError`s.
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -37,20 +38,25 @@ class TradingSignal:
     """Container for a generated trade signal."""
 
     symbol: str
-    side: str  # "BUY" or "SELL"
-    confidence: float
-    expected_return: float
-    epistemic_uncertainty: float
-    aleatoric_uncertainty: float
+    side: str = ""  # "BUY" or "SELL"
+    confidence: float = 0.0
+    expected_return: float = 0.0
+    epistemic_uncertainty: float = 0.0
+    aleatoric_uncertainty: float = 0.0
+    timestamp: float = 0.0
+    regime: RegimeType = RegimeType.SIDEWAYS_LOW_VOL
     # Additional fields expected by the trading loop
     action: str = ""  # alias for side
     quantity: float = 0.0
     signal_strength: float = 0.0
     
     def __post_init__(self):
-        # Set aliases for compatibility
-        if not self.action:
+        # Ensure side and action are aligned
+        if not self.side and self.action:
+            self.side = self.action
+        elif not self.action and self.side:
             self.action = self.side
+        # Default signal strength calculation if not provided
         if not self.signal_strength:
             self.signal_strength = self.confidence * abs(self.expected_return) if self.expected_return != 0 else self.confidence
     # Additional fields can be added as needed
@@ -489,6 +495,8 @@ class SignalGenerator:
             expected_return=expected_return,
             epistemic_uncertainty=epistemic,
             aleatoric_uncertainty=aleatoric,
+            timestamp=time.time(),
+            regime=regime,
         )
 
 # End of module

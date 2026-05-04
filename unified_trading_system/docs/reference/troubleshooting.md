@@ -573,6 +573,64 @@ else:
 "
 ```
 
+## Health Endpoint Not Responding
+
+### Symptoms
+- `curl http://localhost:8080/health` hangs or returns no response
+- Health check appears dead despite system running
+- Port 8080 shows as listening but no response
+
+### Root Cause
+**⚠️ Known Issue:** `observability/health.py:256` uses `http.server.HTTPServer` which **blocks the asyncio event loop**.
+
+The `HealthServer.start()` method calls `serve_forever()` which is a **synchronous blocking call**. Since the health server runs in the same thread as the asyncio event loop (`EnhancedTradingLoop`), the health endpoint cannot respond until the event loop yields control — which it never does during the trading loop.
+
+### Diagnosis
+```bash
+# Check if port is listening
+ss -tlnp | grep 8080
+
+# Try to curl (will hang)
+curl -m 5 http://localhost:8080/health
+
+# Check if the issue is the http.server blocking
+python3 -c "
+import sys; sys.path.insert(0, '.')
+from observability.health import HealthServer
+import inspect
+src = inspect.getsource(HealthServer.start)
+if 'serve_forever' in src:
+    print('❌ BUG: serve_forever() blocks asyncio')
+else:
+    print('✅ HealthServer is non-blocking')
+"
+```
+
+### Solution (Tier 1 Fix #4)
+Replace the blocking `http.server` with `aiohttp.web` in `observability/health.py`.
+
+**See:** `docs/runbooks/SRE_RUNBOOK.md` Section 6.1 for the complete fix and code.
+
+```bash
+# Quick fix: replace HealthServer.start() with async aiohttp version
+nano observability/health.py
+# Find class HealthServer and replace start() with async version
+# Then restart
+./manage.sh restart
+
+# Verify
+curl http://localhost:8080/health
+```
+
+### Workaround (if you can't fix immediately)
+Check process health without using :8080:
+```bash
+ps aux | grep run_enhanced_testnet | grep -v grep
+tail -5 logs/final.log | grep "Completed cycle"
+```
+
+---
+
 ## Advanced Troubleshooting
 
 ### Enabling Debug Mode

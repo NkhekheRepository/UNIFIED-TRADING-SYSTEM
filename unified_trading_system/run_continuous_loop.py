@@ -13,10 +13,6 @@ import time
 from datetime import datetime
 from typing import Dict, Optional
 
-# Set up environment
-os.environ['TELEGRAM_BOT_TOKEN'] = '8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE'
-os.environ['TELEGRAM_CHAT_IDS'] = '7361240735'
-
 # Binance API credentials
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
@@ -105,9 +101,6 @@ async def place_order(client: BinanceFuturesClient, symbol: str, side: str, quan
         order = await client.create_order(symbol, side, 'MARKET', quantity)
         
         # Send Telegram alert
-        os.environ['TELEGRAM_BOT_TOKEN'] = '8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE'
-        os.environ['TELEGRAM_CHAT_IDS'] = '7361240735'
-        
         from observability.alerting import configure_alerting_from_env, send_trade_execution_alert
         configure_alerting_from_env()
         

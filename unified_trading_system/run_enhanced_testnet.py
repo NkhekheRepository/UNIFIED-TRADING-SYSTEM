@@ -8,10 +8,6 @@ import asyncio
 import os
 import logging
 
-# Set up environment
-os.environ['TELEGRAM_BOT_TOKEN'] = '8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE'
-os.environ['TELEGRAM_CHAT_IDS'] = '7361240735'
-
 # Load API keys from .env (only for run_enhanced_testnet.py)
 from dotenv import load_dotenv
 load_dotenv('/home/nkhekhe/unified_trading_system/.env')

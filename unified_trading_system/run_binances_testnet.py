@@ -12,10 +12,6 @@ import hashlib
 import time
 from typing import Dict, Optional
 
-# Set up environment
-os.environ['TELEGRAM_BOT_TOKEN'] = '8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE'
-os.environ['TELEGRAM_CHAT_IDS'] = '7361240735'
-
 # Binance API credentials
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")

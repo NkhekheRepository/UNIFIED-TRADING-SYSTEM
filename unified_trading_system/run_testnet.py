@@ -7,10 +7,6 @@ import asyncio
 import os
 import logging
 
-# Set up environment
-os.environ['TELEGRAM_BOT_TOKEN'] = '8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE'
-os.environ['TELEGRAM_CHAT_IDS'] = '7361240735'
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,

@@ -18,7 +18,7 @@ except ImportError:
     logging.warning("sklearn not available, some ML features disabled")
 
 from .belief_state import BeliefState
-from .models import TradingSignal, SignalAction
+from .signal_generator import TradingSignal
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +87,9 @@ class SignalGenerator:
             
             # Determine action based on weighted expected return
             if weighted_expected_return > self.min_expected_return:
-                action = SignalAction.BUY
+                action = "BUY"
             elif weighted_expected_return < -self.min_expected_return:
-                action = SignalAction.SELL
+                action = "SELL"
             else:
                 continue  # Skip neutral signals
             
@@ -108,7 +108,7 @@ class SignalGenerator:
                 confidence=confidence,
                 expected_return=weighted_expected_return,
                 timestamp=belief_state.timestamp,
-                regime=regime.value if hasattr(regime, 'value') else str(regime),
+                regime=regime,
                 signal_strength=signal_strength
             )
             

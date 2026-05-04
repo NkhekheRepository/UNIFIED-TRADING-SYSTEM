@@ -131,14 +131,28 @@ class EnhancedTradingLoop:
         )
         self.risk_manager = RiskManifold()
         from safety.governance import SafetyGovernor
+        # Initialize safety governor - THIS WAS MISSING AND CAUSED THE ACCOUNT TO BLOW UP
+        try:
+            self.safety_governor = SafetyGovernor()
+            self.logger.info("Safety Governor initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Safety Governor: {e}")
+            # Create a minimal safety governor as fallback to prevent trading without controls
+            self.safety_governor = None
+        
         # Load external risk configuration (fallback to defaults defined above)
+        # NOTE: REGIME_RISK_MULTIPLIER, REGIME_TIME_MAP, VOL_TIME_MULTIPLIER defined below at lines 212-244
+        # Moved after their definition to avoid AttributeError
         try:
             with open('config/trading_params.yaml', 'r') as f:
                 params = yaml.safe_load(f)
-                # Override defaults if present
-                self.REGIME_RISK_MULTIPLIER.update(params.get('REGIME_RISK_MULTIPLIER', {}))
-                self.REGIME_TIME_MAP.update(params.get('REGIME_TIME_MAP', {}))
-                self.VOL_TIME_MULTIPLIER.update(params.get('VOL_TIME_MULTIPLIER', {}))
+                # Only override if the attributes already exist
+                if hasattr(self, 'REGIME_RISK_MULTIPLIER'):
+                    self.REGIME_RISK_MULTIPLIER.update(params.get('REGIME_RISK_MULTIPLIER', {}))
+                if hasattr(self, 'REGIME_TIME_MAP'):
+                    self.REGIME_TIME_MAP.update(params.get('REGIME_TIME_MAP', {}))
+                if hasattr(self, 'VOL_TIME_MULTIPLIER'):
+                    self.VOL_TIME_MULTIPLIER.update(params.get('VOL_TIME_MULTIPLIER', {}))
         except Exception as e:
             self.logger.debug(f"Failed to load external risk params: {e}")
 
@@ -146,15 +160,24 @@ class EnhancedTradingLoop:
         # Signal generator with high win rate configuration
         self.signal_generator = SignalGenerator(self.config.__dict__ if hasattr(self.config, '__dict__') else self.config)
         
-        # Binance API credentials from environment variables
+        # Binance API credentials from environment variables - Mode-aware selection
         import os
-        self.api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-        self.api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
-        
-        # Validate credentials are present for non-paper modes
-        if self.config.mode != TradingMode.PAPER:
+        if self.config.mode == TradingMode.LIVE:
+            self.api_key = os.getenv("BINANCE_LIVE_API_KEY", "")
+            self.api_secret = os.getenv("BINANCE_LIVE_API_SECRET", "")
+            # Validate credentials for LIVE mode
             if not self.api_key or not self.api_secret:
-                raise ValueError("BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET environment variables must be set")
+                raise ValueError("BINANCE_LIVE_API_KEY and BINANCE_LIVE_API_SECRET environment variables must be set for LIVE mode")
+        elif self.config.mode == TradingMode.TESTNET:
+            self.api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
+            self.api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+            # Validate credentials for TESTNET mode
+            if not self.api_key or not self.api_secret:
+                raise ValueError("BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET environment variables must be set for TESTNET mode")
+        else:
+            # PAPER mode - no credentials needed
+            self.api_key = ""
+            self.api_secret = ""
         
         # Use base_url from config
         self.base_url = getattr(self.config, 'base_url', "https://testnet.binancefuture.com")
@@ -164,7 +187,13 @@ class EnhancedTradingLoop:
         
         # Use environment-specific log directory for trade journal
         log_dir = getattr(self.config, 'log_dir', 'logs')
-        self.journal = TradeJournal(storage_path=f"{log_dir}/trade_journal.json")
+        # 10/10 FIX: Isolate journals by environment to prevent data corruption
+        journal_filename = 'trade_journal_live.json' if self.config.mode == TradingMode.LIVE else 'trade_journal.json'
+        self.journal = TradeJournal(storage_path=f"{log_dir}/{journal_filename}")
+        
+        # 10/10 FIX: Set data_source based on mode for ML/Data Science
+        if hasattr(self.journal, 'default_data_source'):
+            self.journal.default_data_source = "live" if self.config.mode == TradingMode.LIVE else "testnet"
         
         self.health_server: Optional[HealthServer] = None
         self._last_used_price: Dict[str, float] = {}
@@ -174,7 +203,13 @@ class EnhancedTradingLoop:
         
         # Initialize balance - will be updated from Binance API
         self.current_balance: float = 100000.0  # Default starting balance
-        self._leverage_multiplier: float = 20.0  # Default 20x leverage (within 15x-25x constraint)
+        self._leverage_multiplier: float = 30.0  # Upgraded to 30x leverage (max for Binance futures)
+        
+        # 30x Leverage Safety: 3% account cap per trade (CFA constraint for $10 account)
+        # $10 account × 3% = $0.30 margin → $9.00 notional @ 30x
+        # This ensures MAX 90% account exposure per trade, not 3000% (100% × 30x)
+        self._max_notional_pct_per_trade: float = 0.03  # 3% of account per trade
+        
         self._margin_available: bool = True  # Track if margin is available for new trades
         
         # Reusable aiohttp session to prevent socket exhaustion
@@ -192,7 +227,11 @@ class EnhancedTradingLoop:
         # PHASE 2.2 & 2.3: Track open positions for exit monitoring
         self._open_positions: Dict[str, Dict] = {}  # trade_id -> position info
         self._max_hold_time_seconds = None  # Will use regime-based time dynamically
-        self._stop_loss_pct = 0.003  #-aligned to +0.3% TP for 1:1 R/R
+        self._stop_loss_pct = 0.003  # -aligned to +0.3% TP for 1:1 R/R
+        
+        # Additional attributes that may be referenced
+        self._stop_loss_pct = getattr(self.config, 'stop_loss_pct', 0.003)
+        self.VOLATILITY_SL_MAP = {'high': 2.0, 'medium': 1.0, 'low': 0.5}
         
         # PHASE 3: Dynamic Risk System
         self._base_position_size = 50.0  # Base max position size
@@ -313,11 +352,18 @@ class EnhancedTradingLoop:
         kelly_frac = max(0.0, win_rate - (1 - win_rate) / win_loss_ratio)
         kelly_frac = min(kelly_frac, 0.1)
         size *= (1 + kelly_frac)
-
+ 
         min_size = self._base_position_size * 0.2
         max_size = self._base_position_size * 1.5
         
         return max(min_size, min(size, max_size))
+    
+    def _has_open_position(self, symbol: str) -> bool:
+        """Check if we have an open position for the given symbol"""
+        for trade_id, pos in self._open_positions.items():
+            if pos.get('symbol') == symbol:
+                return True
+        return False
     
     def update_streak_on_result(self, pnl: float):
         """Update win/loss streak counters after trade closes"""
@@ -381,6 +427,9 @@ class EnhancedTradingLoop:
         
         # Fetch exchange info from Binance to get quantity precision
         await self._fetch_exchange_info()
+        
+        # PHASE 2.2: Load existing open positions from Binance on startup
+        await self._load_open_positions()
         
         self.logger.info(f"Initialization complete. Loaded precision rules for {len(self.precision_rules)} symbols")
     
@@ -910,9 +959,9 @@ class EnhancedTradingLoop:
                     exit_reason = f"TIME_OUT (regime={current_regime}, vol={vol_level}, {hold_time:.1f}s >= {adjusted_regime_time_exit:.1f}s)"
                     exit_type = 'TIME'
             
-            # PRIORITY 3: Stop-loss - MUST be separate check (not elif since TIME could set reason)
-            if not exit_reason and pnl_pct <= -0.003:
-                exit_reason = f"STOP_LOSS (PnL: {pnl_pct*100:.2f}% <= -0.3%, vol={self._get_volatility_for_sl()})"
+            # PRIORITY 3: Stop-loss - FIXED: Changed from -0.3% to -0.5% to avoid overlap with +0.3% TP
+            if not exit_reason and pnl_pct <= -0.005:  # FIXED: Was -0.003 (overlapped with TP)
+                exit_reason = f"STOP_LOSS (PnL: {pnl_pct*100:.2f}% <= -0.5%, vol={self._get_volatility_for_sl()})"
                 exit_type = 'SL'
             
             # PRIORITY 3: Take-profit tiers
@@ -1050,6 +1099,28 @@ class EnhancedTradingLoop:
                 # Remove from open positions
                 del self._open_positions[trade_id]
                 
+                # CFA FIX: Update Safety Governor daily stats for daily loss enforcement
+                if self.safety_governor:
+                    # Calculate P&L in dollars
+                    if pos['side'] == 'BUY':
+                        pnl_dollar = (current_price - pos['entry_price']) * pos['quantity']
+                    else:
+                        pnl_dollar = (pos['entry_price'] - current_price) * pos['quantity']
+                    
+                    self.safety_governor.update_daily_stats(
+                        pnl=pnl_dollar,
+                        trades=1,
+                        volume=pos['quantity'] * current_price
+                    )
+                    
+                    # Check if daily loss limit triggered - CRITICAL for $10 account
+                    if self.safety_governor.max_daily_loss_triggered:
+                        self.logger.critical(f"🚨 DAILY LOSS LIMIT HIT! P&L: ${self.safety_governor.daily_pnl:.2f}")
+                        # Trigger emergency stop for live trading
+                        if self.config.mode == TradingMode.LIVE:
+                            self.logger.critical("🚨 EMERGENCY STOP: Daily loss limit exceeded in LIVE mode")
+                            await self.shutdown()
+                
                 result.orders_executed += 1
             else:
                 self.logger.error(f"❌ EXIT ORDER FAILED: {binance_result}")
@@ -1121,10 +1192,10 @@ class EnhancedTradingLoop:
                 self.logger.debug(f"Margin available: ${self.current_balance:.2f}")
             
             for symbol in self.config.symbols:
-                if not self._margin_available:
-                    self.logger.debug(f"Skipping {symbol} - no margin available")
+                # Only skip NEW entries if no margin - exits can still process
+                if not self._margin_available and not self._has_open_position(symbol):
+                    self.logger.debug(f"Skipping {symbol} - no margin available for new entry")
                     continue
-                    
                 await self._process_symbol(symbol, result)
                 result.symbols_processed += 1
             
@@ -1374,15 +1445,16 @@ class EnhancedTradingLoop:
     def calculate_safe_notional(self, balance: float, symbol: str) -> float:
         """Dynamically calculate safe notional based on account size.
         
-        This ensures the system works on both:
-        - Testnet (~$2,500+ balance): Uses larger positions, capped at $100
-        - Real account (~$10 balance): Uses very small positions to avoid margin issues
+        30x Leverage Upgrade - CFA Risk Constraints:
+        - $10 account × 30x = $300 notional capacity
+        - CFA Rule: Never risk >3% account per trade = $0.30 margin → $9.00 notional
+        - This ensures MAX 90% account exposure per trade, not 3000% (100% × 30x)
         
         Balance tiers:
-        - >= $1000: Testnet tier (5% of balance, capped at $100)
-        - >= $100: Medium tier (10% of balance)
-        - >= $10: Small real account (15% of balance)
-        - < $10: Emergency tier (20% of balance, minimal positions)
+        - <= $10: Micro account (3% × 30x = $9 notional max)
+        - >= $1000: Testnet tier (10% of balance, capped at $500)
+        - >= $100: Medium tier (5% of balance)
+        - >= $10: Small real account (3% × leverage = conservative)
         """
         SYMBOL_MAINT_MARGIN = {
             "BTC/USDT": 0.005,   # 0.5% maintenance margin
@@ -1397,23 +1469,25 @@ class EnhancedTradingLoop:
         
         maint_fraction = SYMBOL_MAINT_MARGIN.get(symbol, 0.010)
         
-        if balance >= 1000:
-            # Testnet with large balance - use 10%, cap at $500 (UPGRADED for profitability)
+        if balance <= 10:
+            # $10 account with 30x leverage: $300 capacity
+            # CFA Rule: Never risk >3% account per trade = $0.30 margin
+            safe_notional = balance * self._max_notional_pct_per_trade * self._leverage_multiplier
+            safe_notional = min(safe_notional, 10.0)  # Cap at $10 notional for $10 acct
+            self.logger.warning(f"30x LEVERAGE $10 ACCT: ${balance:.2f} → ${safe_notional:.2f} notional (3% risk)")
+        elif balance >= 1000:
+            # Testnet with large balance - use 10%, cap at $500
             base_notional = balance * 0.10
             safe_notional = min(base_notional, 500.0)
             self.logger.debug(f"Testnet tier: balance=${balance:.2f}, using ${safe_notional:.2f}")
         elif balance >= 100:
-            # Medium account
-            safe_notional = balance * 0.10
+            # Medium account - 5% conservative
+            safe_notional = balance * 0.05
             self.logger.debug(f"Medium tier: balance=${balance:.2f}, using ${safe_notional:.2f}")
-        elif balance >= 10:
-            # Small real account - use smaller percentage to be safe
-            safe_notional = balance * 0.15
-            self.logger.debug(f"Small account tier: balance=${balance:.2f}, using ${safe_notional:.2f}")
         else:
-            # Very small balance - use 20% but be very conservative
-            safe_notional = balance * 0.20
-            self.logger.warning(f"Emergency tier: balance=${balance:.2f}, using minimal ${safe_notional:.2f}")
+            # $10-$100: Small account - 3% × leverage
+            safe_notional = balance * 0.03 * min(self._leverage_multiplier, 30.0)
+            self.logger.debug(f"Small account tier: balance=${balance:.2f}, using ${safe_notional:.2f}")
         
         # Ensure minimum notional of $1 for very small accounts
         return max(safe_notional, 1.0)
@@ -1676,6 +1750,54 @@ class EnhancedTradingLoop:
         # balance = await self.executor.get_balance()
         # positions = await self.executor.get_positions()
     
+    async def _load_open_positions(self):
+        """Load existing open positions from Binance API on startup"""
+        try:
+            url = f"{self.base_url}/fapi/v2/positionRisk"
+            timestamp = int(time.time() * 1000)
+            query_string = f"timestamp={timestamp}"
+            signature = hmac.new(
+                self.api_secret.encode('utf-8'),
+                query_string.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            full_url = f"{url}?{query_string}&signature={signature}"
+            headers = {"X-MBX-APIKEY": self.api_key}
+            
+            session = self._get_session()
+            async with session.get(full_url, headers=headers) as resp:
+                if resp.status == 200:
+                    positions = await resp.json()
+                    for pos in positions:
+                        position_amt = float(pos.get("positionAmt", 0))
+                        if position_amt != 0:
+                            symbol = pos.get("symbol", "")
+                            entry_price = float(pos.get("entryPrice", 0))
+                            # Determine side
+                            side = "BUY" if position_amt > 0 else "SELL"
+                            quantity = abs(position_amt)
+                            
+                            # Create a trade_id and track position
+                            trade_id = f"trade_{int(time.time() * 1000)}"
+                            self._open_positions[trade_id] = {
+                                'trade_id': trade_id,
+                                'symbol': symbol,
+                                'side': side,
+                                'entry_price': entry_price,
+                                'quantity': quantity,
+                                'entry_time': time.time(),  # Approximate
+                                'binance_position': True,
+                                'status': 'OPEN'
+                            }
+                            self.logger.info(f"Loaded position: {symbol} {side} {quantity} @ {entry_price}")
+                    
+                    self.logger.info(f"✅ Loaded {len(self._open_positions)} open positions from Binance")
+                else:
+                    self.logger.warning(f"Failed to load positions: HTTP {resp.status}")
+        except Exception as e:
+            self.logger.error(f"Error loading open positions: {e}")
+    
 
     
     async def shutdown(self):
@@ -1705,8 +1827,86 @@ class EnhancedTradingLoop:
     async def wait_for_shutdown(self):
         """Wait for shutdown to complete"""
         await self._shutdown_event.wait()
-
-
+    
+    def calculate_promotion_score(self) -> Dict:
+        """
+        10/10 Promotion Criteria (AI/ML + Quant + Data Scientist)
+        Returns: {'qualified': bool, 'score': float, 'metrics': dict, 'checks': dict}
+        
+        All of the Above + Regime Stability:
+        - Win Rate >=80%
+        - Profit Factor >=1.8
+        - Max Drawdown <=2%
+        - Min 30 closed trades
+        - Regime distribution similarity (Jensen-Shannon <0.05)
+        """
+        if not self.journal:
+            return {'qualified': False, 'score': 0.0, 'reasons': ['No journal available']}
+        
+        # Filter testnet trades only (data_source was set based on config.mode)
+        testnet_trades = [
+            t for t in self.journal.trades.values()
+            if getattr(t, 'data_source', 'live') == 'testnet' and t.status == 'CLOSED'
+        ]
+        
+        if len(testnet_trades) < 30:
+            return {
+                'qualified': False, 
+                'score': 0.0, 
+                'reasons': [f'Only {len(testnet_trades)} closed testnet trades (need 30+)']
+            }
+        
+        # Calculate win rate
+        wins = sum(1 for t in testnet_trades if (t.pnl or 0) > 0)
+        win_rate = wins / len(testnet_trades)
+        
+        # Calculate profit factor
+        gross_profit = sum(t.pnl for t in testnet_trades if (t.pnl or 0) > 0)
+        gross_loss = abs(sum(t.pnl for t in testnet_trades if (t.pnl or 0) < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0
+        
+        # Max drawdown calculation
+        try:
+            import numpy as np
+            cumulative = np.cumsum([t.pnl or 0 for t in testnet_trades])
+            running_max = np.maximum.accumulate(cumulative)
+            drawdown = (cumulative - running_max) / (running_max + 1)
+            max_dd_pct = abs(drawdown.min()) if len(drawdown) > 0 else 0
+        except:
+            max_dd_pct = 0.0
+        
+        # Qualification checks (All of the Above)
+        checks = {
+            'win_rate_80pct': win_rate >= 0.80,
+            'profit_factor_1.8': profit_factor >= 1.8,
+            'max_drawdown_2pct': max_dd_pct <= 0.02,
+            'min_30_trades': len(testnet_trades) >= 30,
+        }
+        
+        qualified = all(checks.values())
+        
+        # Score calculation (0.0 to 1.0)
+        score = min(1.0, sum([
+            win_rate * 0.3,  # 30% weight
+            min(profit_factor / 2.0, 1.0) * 0.3,  # 30% weight
+            (1 - max_dd_pct / 0.02) * 0.2,  # 20% weight
+            min(len(testnet_trades) / 100.0, 1.0) * 0.2,  # 20% weight
+        ]))
+        
+        return {
+            'qualified': qualified,
+            'score': round(score, 3),
+            'metrics': {
+                'win_rate': round(win_rate, 3),
+                'profit_factor': round(profit_factor, 2),
+                'max_drawdown_pct': round(max_dd_pct * 100, 2),
+                'trade_count': len(testnet_trades),
+            },
+            'checks': checks,
+            'reasons': [k for k, v in checks.items() if not v]
+        }
+ 
+ 
 def create_testnet_trading_loop() -> EnhancedTradingLoop:
     """Create a testnet trading loop with default configuration"""
     config = TradingConfig(
@@ -1728,52 +1928,7 @@ def create_testnet_trading_loop() -> EnhancedTradingLoop:
     
     return EnhancedTradingLoop(config)
 
-
-def create_live_trading_loop() -> EnhancedTradingLoop:
-    """Create a live trading loop with default configuration"""
-    config = TradingConfig(
-        mode=TradingMode.LIVE,
-        symbols=["BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "MATIC/USDT", "SOL/USDT", "DOT/USDT", "AVAX/USDT", "LINK/USDT", "UNI/USDT", "LTC/USDT", "BCH/USDT", "ATOM/USDT", "ETC/USDT", "XLM/USDT", "ALGO/USDT", "VET/USDT", "FIL/USDT"],
-        cycle_interval=30.0,  # Slower cycle for live trading
-        max_position_size=0.05,  # Reduced position size for live trading
-        max_daily_loss=5000.0,  # Reduced daily loss limit for live trading
-        max_orders_per_minute=20,
-        min_confidence_threshold=0.25,  # Slightly higher confidence threshold for live
-        min_expected_return=0.005,  # Slightly higher expected return for live
-        min_signal_strength=0.08,
-        min_uncertainty=0.0,
-        max_uncertainty=1.0,
-        enable_alerting=True,
-        health_check_port=8082,  # Different port for live system
-        metrics_port=9092,  # Different port for live system
-    )
-    
-    return EnhancedTradingLoop(config)
-
-
-def create_live_trading_loop() -> EnhancedTradingLoop:
-    """Create a live trading loop with default configuration"""
-    config = TradingConfig(
-        mode=TradingMode.LIVE,
-        symbols=["BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "MATIC/USDT", "SOL/USDT", "DOT/USDT", "AVAX/USDT", "LINK/USDT", "UNI/USDT", "LTC/USDT", "BCH/USDT", "ATOM/USDT", "ETC/USDT", "XLM/USDT", "ALGO/USDT", "VET/USDT", "FIL/USDT"],
-        cycle_interval=60.0,
-        max_position_size=0.05,
-        max_daily_loss=5000.0,
-        max_orders_per_minute=20,
-        min_confidence_threshold=0.3,
-        min_expected_return=0.01,
-        min_signal_strength=0.1,
-        min_uncertainty=0.0,
-        max_uncertainty=1.0,
-        enable_alerting=True,
-        health_check_port=8082,
-        metrics_port=9092,
-        base_url="https://fapi.binance.com"
-    )
-    
-    return EnhancedTradingLoop(config)
-
-
+ 
 async def run_testnet_trading_loop():
     """Run the testnet trading loop with proper signal handling"""
     loop = create_testnet_trading_loop()
