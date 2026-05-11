@@ -10,8 +10,8 @@ Complete reference for all environment variables, configuration files, and param
 
 | Variable | Description | Required | Example Value | Location |
 |-----------|-------------|----------|-----------------|----------|
-| `BINANCE_TESTNET_API_KEY` | Binance Testnet API key | **YES** | `RvrWtLpwETPHHCMvo...` | `.env:2` |
-| `BINANCE_TESTNET_API_SECRET` | Binance Testnet API secret | **YES** | `WcHXFN8WdgfCINkJl...` | `.env:3` |
+| `BINANCE_TESTNET_API_KEY` | Binance Testnet API key | **YES** | `your_testnet_api_key_here` | `.env:2` |
+| `BINANCE_TESTNET_API_SECRET` | Binance Testnet API secret | **YES** | `your_testnet_api_secret_here` | `.env:3` |
 | `BINANCE_TESTNET` | Set to `true` for testnet | NO | `true` | `.env:4` |
 | `TESTNET_BASE_URL` | Testnet API URL | NO | `https://testnet.binancefuture.com` | `.env:5` |
 
@@ -19,8 +19,8 @@ Complete reference for all environment variables, configuration files, and param
 
 | Variable | Description | Required | Example Value | Location |
 |-----------|-------------|----------|-----------------|----------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | NO | `8668023431:AAFJl08...` | `observability/alerting.py:419` |
-| `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs | NO | `7361240735` | `observability/alerting.py:420` |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token | NO | `your_telegram_bot_token_here` | `observability/alerting.py:419` |
+| `TELEGRAM_CHAT_IDS` | Comma-separated chat IDs | NO | `your_telegram_chat_id_here` | `observability/alerting.py:420` |
 | `LOG_LEVEL` | Logging level | NO | `INFO` (default), `DEBUG` | `.env.example:6` |
 
 ### 1.3 Live Trading Variables#

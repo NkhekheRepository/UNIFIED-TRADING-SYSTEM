@@ -1,6 +1,6 @@
 """
 Enhanced Continuous Trading Loop with Governance and Risk Controls
-Integrates all trading system components with full observability and alerting.
+        # Validate required configuration attributes
 """
 
 import asyncio
@@ -56,22 +56,22 @@ class TradingConfig:
     """Trading configuration"""
     mode: TradingMode = TradingMode.PAPER
     
-    symbols: List[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "MATIC/USDT", "SOL/USDT", "DOT/USDT", "AVAX/USDT", "LINK/USDT", "UNI/USDT", "LTC/USDT", "BCH/USDT", "ATOM/USDT", "ETC/USDT", "XLM/USDT", "ALGO/USDT", "VET/USDT", "FIL/USDT"])
+    symbols: List[str] = field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "MATIC/USDT", "SOL/USDT", "DOT/USDT", "LTC/USDT", "BCH/USDT", "ATOM/USDT", "ETC/USDT", "ALGO/USDT", "VET/USDT", "FIL/USDT"])
     
     cycle_interval: float = 60.0
     
     max_position_size: float = 500.0  # Updated to enforce $500 cap per trade
-    max_daily_loss: float = 10000.0
+    max_daily_loss: float = 3.0  # $3 max daily loss (30% of $10 account)
     max_orders_per_minute: int = 10
     
     # Signal generation parameters
-    min_confidence_threshold: float = 0.85  # Optimized based on 360-degree analysis (optimal range 0.85-0.90)
+    min_confidence_threshold: float = 0.55  # Balanced: 0.85 blocked all signals, 0.55 + uncertainty penalty = ~0.78 adaptive threshold
     min_expected_return: float = 0.01
     min_signal_strength: float = 0.1
     
     # Optimized Parameters (360-degree analysis)
-    take_profit_pct: float = 0.003  # +0.3% take profit (100% win rate in data)
-    stop_loss_pct: float = 0.005  # -0.5% stop loss
+    take_profit_pct: float = 0.006  # +0.6% take profit (2:1 R:R)
+    stop_loss_pct: float = 0.003  # -0.3% stop loss (2:1 R:R)
     max_trades_per_cycle: int = 1  # Reduced from unlimited to 1 (was overtrading)
     regime_direction_filter: bool = True  # Block SELL in RECOVERY
     
@@ -90,6 +90,7 @@ class TradingConfig:
     
     # Base URL for API connections
     base_url: str = "https://testnet.binancefuture.com"
+    max_leverage: float = 30.0
 
 
 @dataclass
@@ -112,6 +113,8 @@ class EnhancedTradingLoop:
     
     def __init__(self, config: TradingConfig):
         self.config = config
+        # Validate required configuration attributes
+        self._validate_config()
         self.logger = TradingLogger("trading_loop")
         
         self.belief_state_estimator = BeliefStateEstimator()
@@ -139,23 +142,6 @@ class EnhancedTradingLoop:
             self.logger.error(f"Failed to initialize Safety Governor: {e}")
             # Create a minimal safety governor as fallback to prevent trading without controls
             self.safety_governor = None
-        
-        # Load external risk configuration (fallback to defaults defined above)
-        # NOTE: REGIME_RISK_MULTIPLIER, REGIME_TIME_MAP, VOL_TIME_MULTIPLIER defined below at lines 212-244
-        # Moved after their definition to avoid AttributeError
-        try:
-            with open('config/trading_params.yaml', 'r') as f:
-                params = yaml.safe_load(f)
-                # Only override if the attributes already exist
-                if hasattr(self, 'REGIME_RISK_MULTIPLIER'):
-                    self.REGIME_RISK_MULTIPLIER.update(params.get('REGIME_RISK_MULTIPLIER', {}))
-                if hasattr(self, 'REGIME_TIME_MAP'):
-                    self.REGIME_TIME_MAP.update(params.get('REGIME_TIME_MAP', {}))
-                if hasattr(self, 'VOL_TIME_MULTIPLIER'):
-                    self.VOL_TIME_MULTIPLIER.update(params.get('VOL_TIME_MULTIPLIER', {}))
-        except Exception as e:
-            self.logger.debug(f"Failed to load external risk params: {e}")
-
         
         # Signal generator with high win rate configuration
         self.signal_generator = SignalGenerator(self.config.__dict__ if hasattr(self.config, '__dict__') else self.config)
@@ -226,6 +212,7 @@ class EnhancedTradingLoop:
         
         # PHASE 2.2 & 2.3: Track open positions for exit monitoring
         self._open_positions: Dict[str, Dict] = {}  # trade_id -> position info
+        self._cooldowns: Dict[str, float] = {}  # symbol -> cooldown expiry timestamp
         self._max_hold_time_seconds = None  # Will use regime-based time dynamically
         self._stop_loss_pct = 0.003  # -aligned to +0.3% TP for 1:1 R/R
         
@@ -234,7 +221,7 @@ class EnhancedTradingLoop:
         self.VOLATILITY_SL_MAP = {'high': 2.0, 'medium': 1.0, 'low': 0.5}
         
         # PHASE 3: Dynamic Risk System
-        self._base_position_size = 50.0  # Base max position size
+        self._base_position_size = 25.0  # Base max position size
         self._consecutive_wins = 0
         self._consecutive_losses = 0
         
@@ -272,6 +259,23 @@ class EnhancedTradingLoop:
             (18, 22): 0.8,
             (22, 6): 0.3,   # Night - avoid
         }
+
+        try:
+            with open('config/trading_params.yaml', 'r') as f:
+                params = yaml.safe_load(f)
+                if hasattr(self, 'REGIME_RISK_MULTIPLIER'):
+                    self.REGIME_RISK_MULTIPLIER.update(params.get('REGIME_RISK_MULTIPLIER', {}))
+                if hasattr(self, 'REGIME_TIME_MAP'):
+                    self.REGIME_TIME_MAP.update(params.get('REGIME_TIME_MAP', {}))
+                if hasattr(self, 'VOL_TIME_MULTIPLIER'):
+                    self.VOL_TIME_MULTIPLIER.update(params.get('VOL_TIME_MULTIPLIER', {}))
+        except Exception as e:
+            self.logger.debug(f"Failed to load external risk params: {e}")
+
+    def _validate_config(self):
+        """Validate required configuration attributes"""
+        # Placeholder validation - can be expanded as needed
+        pass
 
         
         # ============ DYNAMIC RISK CALCULATION ============
@@ -431,6 +435,79 @@ class EnhancedTradingLoop:
         # PHASE 2.2: Load existing open positions from Binance on startup
         await self._load_open_positions()
         
+        self.logger.info("Initializing enhanced trading loop")
+        
+        set_context(
+            mode=self.config.mode.value,
+            symbols=",".join(self.config.symbols),
+        )
+        
+        if self.config.enable_alerting:
+            configure_alerting_from_env()
+            
+            # Force a test alert to verify Telegram works
+            from observability.alerting import AlertManager, AlertChannel, create_trading_alert, AlertSeverity
+            import asyncio
+            
+            async def test_telegram():
+                mgr = AlertManager.get_instance()
+                test_alert = create_trading_alert(
+                    title="🔔 TEST: System Restart",
+                    message="Trading system started - testing Telegram alerts",
+                    severity=AlertSeverity.INFO
+                )
+                await mgr.send_alert(test_alert)
+            
+            try:
+                asyncio.get_event_loop().run_until_complete(test_telegram())
+            except Exception as e:
+                self.logger.error(f"Test alert failed: {e}")
+            
+            await send_system_status_alert(
+                component="trading_loop",
+                status="initializing",
+            )
+        
+        self.health_server = HealthServer(
+            port=self.config.health_check_port,
+        )
+        # Register health checks
+        self.health_server.registry.register(LambdaHealthCheck(
+            "executor",
+            lambda: (
+                "healthy" if True else "unhealthy",  # Simplified for now
+                "Executor is operational",
+                {}
+            )
+        ))
+        self.health_server.registry.register(LambdaHealthCheck(
+            "belief_state",
+            lambda: (
+                "healthy" if self.belief_state.confidence > 0 else "degraded",
+                "Belief state is initialized",
+                {"confidence": self.belief_state.confidence}
+            )
+        ))
+        self.health_server.registry.register(LambdaHealthCheck(
+            "risk_manager",
+            lambda: (
+                "healthy" if True else "unhealthy",
+                "Risk manager is operational",
+                {}
+            )
+        ))
+        self.health_server.registry.register(LambdaHealthCheck(
+            "edge_detection",
+            lambda: (
+                "edge_detected" if self.compute_edge_t_stat(100)['t_stat'] > 1.96 else ("edge_degraded" if self.compute_edge_t_stat(100)['t_stat'] < -1.96 else "neutral"),
+                "Rolling t-statistic on PnL",
+                self.compute_edge_t_stat(100)
+            )
+        ))
+        self.health_server.start()
+        
+        self._register_metrics()
+        
         self.logger.info(f"Initialization complete. Loaded precision rules for {len(self.precision_rules)} symbols")
     
     async def _fetch_exchange_info(self):
@@ -554,8 +631,11 @@ class EnhancedTradingLoop:
             self.logger.warning(f"Could not set leverage: {e}")
             return False
         
-    async def _place_binance_order(self, signal: TradingSignal, retry_count: int = 0) -> Dict:
-        """Place a market order directly on Binance Testnet with dynamic sizing and retry logic"""
+    async def _place_binance_order(self, signal: TradingSignal, retry_count: int = 0, order_type: str = 'MARKET') -> Dict:
+        """Place an order on Binance with dynamic sizing and retry logic.
+        
+        order_type: 'MARKET' (instant fill, taker fee) or 'LIMIT_MAKER' (post-only, maker fee)
+        """
         # Convert symbol format for Binance (BTC/USDT -> BTCUSDT)
         binance_symbol = signal.symbol.replace("/", "")
         
@@ -574,14 +654,16 @@ class EnhancedTradingLoop:
 
         # Dynamic Sizing: Calculate safe notional based on account balance
         # This works for both testnet (~$2,500) and real accounts (~$10)
-        target_notional = self.calculate_safe_notional(self.current_balance, signal.symbol)
+        base_size = self.calculate_safe_notional(self.current_balance, signal.symbol)
         
-        # PHASE 2.4: Add position size cap for risk management (UPGRADED for profitability)
-        # Increased to $500 to allow meaningful P&L per trade (target: $5-25/trade)
-        MAX_POSITION_SIZE = 500.0  # dollars
-        if target_notional > MAX_POSITION_SIZE:
-            self.logger.warning(f"⚠️ Position size cap applied: ${target_notional:.2f} -> ${MAX_POSITION_SIZE:.2f}")
-            target_notional = MAX_POSITION_SIZE
+        # Apply dynamic sizing: scale by confidence, regime, hour, streaks (base $25 → $4-$75 range)
+        dynamic_size = self.calculate_dynamic_position_size(
+            confidence=signal.confidence,
+            regime=self._get_regime_for_exit(),
+            hour=datetime.now().hour
+        )
+        target_notional = min(dynamic_size, base_size)
+        target_notional = max(target_notional, 10.0)  # Binance minimum notional
         
         # Set leverage before placing order (only on first try)
         # Skip if insufficient margin (account has open positions using most margin)
@@ -598,12 +680,29 @@ class EnhancedTradingLoop:
             self.logger.error(f"Price is zero or negative for {signal.symbol}: {price}")
             return None
         
-        quantity = target_notional / price
-        self.logger.debug(f"Quantity calculation: ${target_notional:.2f} / {price:.4f} = {quantity:.8f}")
-        quantity = self._format_quantity(signal.symbol, quantity)
+        # Use signal quantity for exit orders (confidence=1.0 = set by _close_position)
+        if hasattr(signal, 'quantity') and signal.quantity and float(signal.quantity) > 0 and signal.confidence >= 1.0:
+            quantity = self._format_quantity(signal.symbol, float(signal.quantity))
+            self.logger.debug(f"Using exit signal quantity for {signal.symbol}: {quantity}")
+        else:
+            quantity = target_notional / price
+            self.logger.debug(f"Quantity calculation: ${target_notional:.2f} / {price:.4f} = {quantity:.8f}")
+            quantity = self._format_quantity(signal.symbol, quantity)
+        
         self.logger.debug(f"Formatted quantity: {quantity}")
         
-        self.logger.info(f"🚀 PLACING ORDER: {signal.action} {quantity} {binance_symbol} (Notional: ${target_notional:.2f}, Balance: ${self.current_balance:.2f})")
+        # Auto-increase if quantity rounds to zero (lot size too large for this notional)
+        min_retries = 0
+        while float(quantity) <= 0 and min_retries < 5:
+            target_notional *= 2
+            self.logger.warning(f"Quantity zero after formatting, doubling notional to ${target_notional:.2f}")
+            quantity = target_notional / price
+            quantity = self._format_quantity(signal.symbol, quantity)
+            self.logger.debug(f"Retry formatted quantity: {quantity}")
+            min_retries += 1
+        
+        actual_notional = float(quantity) * price if float(quantity) > 0 else target_notional
+        self.logger.info(f"🚀 PLACING ORDER: {signal.action} {quantity} {binance_symbol} (Notional: ${actual_notional:.2f}, Balance: ${self.current_balance:.2f})")
         
         # Check if quantity is too small after formatting
         if float(quantity) <= 0:
@@ -614,10 +713,24 @@ class EnhancedTradingLoop:
         params = {
             'symbol': binance_symbol,
             'side': signal.action,
-            'type': 'MARKET',
             'quantity': quantity,
             'timestamp': int(time.time() * 1000)
         }
+        
+        if order_type == 'LIMIT_MAKER':
+            params['type'] = 'LIMIT'
+            params['timeInForce'] = 'POST_ONLY'
+            # For maker orders, use the opposite side of the book
+            # BUY at bid (sits as maker), SELL at ask (sits as maker)
+            limit_price = None
+            if signal.action == 'BUY':
+                limit_price = bid_price if bid_price else price
+            else:
+                limit_price = ask_price if ask_price else price
+            # Format to 2 decimal places for USDT pairs (handles most cases)
+            params['price'] = f"{limit_price:.2f}"
+        else:
+            params['type'] = 'MARKET'
         
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
         signature = hmac.new(self.api_secret.encode(), query_string.encode(), hashlib.sha256).hexdigest()
@@ -732,80 +845,51 @@ class EnhancedTradingLoop:
             self.logger.error(f"Error fetching account balance: {e}")
             return 10.0  # Fallback to $10
 
-        self.logger.info("Initializing enhanced trading loop")
-        
-        set_context(
-            mode=self.config.mode.value,
-            symbols=",".join(self.config.symbols),
-        )
-        
-        if self.config.enable_alerting:
-            configure_alerting_from_env()
-            
-            # Force a test alert to verify Telegram works
-            from observability.alerting import AlertManager, AlertChannel, create_trading_alert, AlertSeverity
-            import asyncio
-            
-            async def test_telegram():
-                mgr = AlertManager.get_instance()
-                test_alert = create_trading_alert(
-                    title="🔔 TEST: System Restart",
-                    message="Trading system started - testing Telegram alerts",
-                    severity=AlertSeverity.INFO
-                )
-                await mgr.send_alert(test_alert)
-            
-            try:
-                asyncio.get_event_loop().run_until_complete(test_telegram())
-            except Exception as e:
-                self.logger.error(f"Test alert failed: {e}")
-            
-            await send_system_status_alert(
-                component="trading_loop",
-                status="initializing",
-            )
-        
-        self.health_server = HealthServer(
-            port=self.config.health_check_port,
-        )
-        # Register health checks
-        self.health_server.registry.register(LambdaHealthCheck(
-            "executor",
-            lambda: (
-                "healthy" if True else "unhealthy",  # Simplified for now
-                "Executor is operational",
-                {}
-            )
-        ))
-        self.health_server.registry.register(LambdaHealthCheck(
-            "belief_state",
-            lambda: (
-                "healthy" if self.belief_state.confidence > 0 else "degraded",
-                "Belief state is initialized",
-                {"confidence": self.belief_state.confidence}
-            )
-        ))
-        self.health_server.registry.register(LambdaHealthCheck(
-            "risk_manager",
-            lambda: (
-                "healthy" if True else "unhealthy",
-                "Risk manager is operational",
-                {}
-            )
-        ))
-        self.health_server.start()
-        
-        self._register_metrics()
-        
-        self.logger.info(
-            f"Trading loop initialized in {self.config.mode.value} mode"
-        )
     
     def _register_metrics(self):
         """Register trading metrics"""
         # Metrics are automatically initialized in MetricsCollector.__init__
         # Just ensure they exist by accessing them
         pass
+    
+    def compute_edge_t_stat(self, n_trades: int = 100) -> Dict:
+        """Compute rolling t-statistic on recent trade PnL for edge detection.
+        
+        Reads the trade journal and computes:
+        - t-stat: (mean PnL) / (std_error)
+        - If t > 1.96: edge detected at 95% confidence
+        - If t < -1.96: edge degraded (negative)
+        """
+        try:
+            import json, math
+            with open(self.journal.storage_path, 'r') as f:
+                trades = json.load(f)
+            if isinstance(trades, dict):
+                trades = list(trades.values())
+            closed = [t for t in trades if t.get('pnl') is not None]
+            closed.sort(key=lambda t: float(t.get('exit_time', 0)))
+            # Filter to post-fix trades only (small notional, $10-16 range)
+            recent = [t for t in closed if float(t.get('quantity', 0)) * float(t.get('exit_price', 0) or t.get('entry_price', 0)) < 100]
+            recent = recent[-n_trades:] if len(recent) >= n_trades else recent
+            if len(recent) < 3:
+                return {'t_stat': 0.0, 'n': len(recent), 'mean_pnl': 0.0, 'status': 'insufficient_data'}
+            pnls = [float(t['pnl']) for t in recent]
+            n = len(pnls)
+            mean = sum(pnls) / n
+            var = sum((p - mean)**2 for p in pnls) / (n - 1)
+            se = math.sqrt(var / n)
+            t_stat = mean / se if se > 0 else 0.0
+            total_pnl = sum(pnls)
+            return {
+                't_stat': round(t_stat, 4),
+                'n': n,
+                'mean_pnl': round(mean, 6),
+                'total_pnl': round(total_pnl, 4),
+                'std_err': round(se, 6),
+                'status': 'edge_detected' if t_stat > 1.96 else ('edge_degraded' if t_stat < -1.96 else 'neutral')
+            }
+        except Exception as e:
+            return {'t_stat': 0.0, 'n': 0, 'mean_pnl': 0.0, 'status': f'error: {e}'}
     
     # ============ ENHANCED EXIT STRATEGY CONFIGURATION ============
     
@@ -837,7 +921,7 @@ class EnhancedTradingLoop:
     
     # OPTIMIZED TAKE-PROFIT TIERS (360-analysis: +0.3% = 100% WR)
     TAKE_PROFIT_TIERS = [
-        {'threshold': 0.003, 'size_pct': 1.00, 'name': 'TP_QUICK'},  # +0.3% = 100% WR
+        {'threshold': 0.006, 'size_pct': 1.00, 'name': 'TP_QUICK'},  # +0.6% = 100% close
         {'threshold': 0.015, 'size_pct': 0.50, 'name': 'TP1'},
         {'threshold': 0.030, 'size_pct': 0.30, 'name': 'TP2'},
         {'threshold': 0.050, 'size_pct': 0.20, 'name': 'TP3'},
@@ -849,6 +933,10 @@ class EnhancedTradingLoop:
         'trailing_distance': 0.015,  # 1.5% trailing distance
         'min_lock': 0.005,           # Lock at least 0.5%
     }
+    
+    # Fee rates for PnL calculations (Binance USDS-M futures)
+    TAKER_FEE_RATE = 0.0004  # 0.04% taker fee
+    MAKER_FEE_RATE = 0.0002  # 0.02% maker fee
     
     # ============ ENHANCED EXIT CONDITIONS ============
     
@@ -938,30 +1026,23 @@ class EnhancedTradingLoop:
             exit_reason = None
             exit_type = None
             
-            # PRIORITY 1: +0.3% Take-Profit (check highest_pnl, not current)
-            if pos['highest_pnl'] >= 0.003:
+            # PRIORITY 1: +0.6% Take-Profit (check highest_pnl, not current)
+            if pos['highest_pnl'] >= 0.006:
                 self.logger.info(f"🎯 TP TRIGGERED: {pos['symbol']} peak={pos['highest_pnl']*100:.2f}% at {hold_time:.1f}s")
-                exit_reason = f"TAKE_PROFIT_0.3 (peak: {pos['highest_pnl']*100:.2f}%, current: {pnl_pct*100:.2f}%)"
+                exit_reason = f"TAKE_PROFIT_0.6 (peak: {pos['highest_pnl']*100:.2f}%, current: {pnl_pct*100:.2f}%)"
                 exit_type = 'TP'
             
             # PRIORITY 2: Time-based exit (only if TP not triggered)
             elif not exit_reason:
-                vol_level = self._get_volatility_for_sl()
-                vol_time_multiplier = {
-                    'high': 0.7,
-                    'medium': 1.0,
-                    'low': 1.3
-                }.get(vol_level, 1.0)
-                
-                adjusted_regime_time_exit = max(regime_time_exit * vol_time_multiplier, 300.0)  # min 300s (5 min) for TP
+                adjusted_regime_time_exit = max(regime_time_exit, 30.0)
                 
                 if hold_time >= adjusted_regime_time_exit:
-                    exit_reason = f"TIME_OUT (regime={current_regime}, vol={vol_level}, {hold_time:.1f}s >= {adjusted_regime_time_exit:.1f}s)"
+                    exit_reason = f"TIME_OUT (regime={current_regime}, vol={self._get_volatility_for_sl()}, {hold_time:.1f}s >= {adjusted_regime_time_exit:.1f}s)"
                     exit_type = 'TIME'
             
-            # PRIORITY 3: Stop-loss - FIXED: Changed from -0.3% to -0.5% to avoid overlap with +0.3% TP
-            if not exit_reason and pnl_pct <= -0.005:  # FIXED: Was -0.003 (overlapped with TP)
-                exit_reason = f"STOP_LOSS (PnL: {pnl_pct*100:.2f}% <= -0.5%, vol={self._get_volatility_for_sl()})"
+            # PRIORITY 3: Stop-loss at -0.3% (2:1 R:R with +0.6% TP)
+            if not exit_reason and pnl_pct <= -0.003:
+                exit_reason = f"STOP_LOSS (PnL: {pnl_pct*100:.2f}% <= -0.3%, vol={self._get_volatility_for_sl()})"
                 exit_type = 'SL'
             
             # PRIORITY 3: Take-profit tiers
@@ -1070,9 +1151,16 @@ class EnhancedTradingLoop:
             signal_strength=1.0
         )
         
-        # Place exit order
+        # Place exit order — use LIMIT_MAKER for TP (maker fee 0.02%), MARKET for SL/timeout
+        # On second attempt, always use MARKET to ensure fill
+        if 'exit_attempted' in pos:
+            order_type = 'MARKET'
+        else:
+            pos['exit_attempted'] = True
+            order_type = 'LIMIT_MAKER' if 'TAKE_PROFIT' in exit_reason else 'MARKET'
+        
         try:
-            binance_result = await self._place_binance_order(exit_signal)
+            binance_result = await self._place_binance_order(exit_signal, order_type=order_type)
             
             if binance_result and 'orderId' in binance_result:
                 order_status = binance_result.get('status', '')
@@ -1085,6 +1173,7 @@ class EnhancedTradingLoop:
                 self.logger.critical(f"✅ EXIT ORDER PLACED: {close_side} {filled_qty} {pos['symbol']} @ {avg_price} | Status: {order_status}")
                 
                 # Record exit in journal
+                exit_fee = filled_qty * avg_price * (self.MAKER_FEE_RATE if 'TAKE_PROFIT' in exit_reason else self.TAKER_FEE_RATE)
                 self.journal.record_exit(
                     trade_id,
                     exit_price=avg_price,
@@ -1092,12 +1181,14 @@ class EnhancedTradingLoop:
                         'exit_reason': exit_reason,
                         'binance_order_id': binance_result.get('orderId'),
                         'binance_status': order_status,
-                        'exit_type': 'REAL'
+                        'exit_type': 'REAL',
+                        'exit_fee': exit_fee
                     }
                 )
                 
                 # Remove from open positions
                 del self._open_positions[trade_id]
+                self._cooldowns[pos['symbol']] = time.time() + 300  # 5-min cooldown before re-entry
                 
                 # CFA FIX: Update Safety Governor daily stats for daily loss enforcement
                 if self.safety_governor:
@@ -1192,9 +1283,11 @@ class EnhancedTradingLoop:
                 self.logger.debug(f"Margin available: ${self.current_balance:.2f}")
             
             for symbol in self.config.symbols:
-                # Only skip NEW entries if no margin - exits can still process
-                if not self._margin_available and not self._has_open_position(symbol):
-                    self.logger.debug(f"Skipping {symbol} - no margin available for new entry")
+                if symbol in self._cooldowns and time.time() < self._cooldowns[symbol]:
+                    continue
+                if self._has_open_position(symbol):
+                    continue
+                if not self._margin_available:
                     continue
                 await self._process_symbol(symbol, result)
                 result.symbols_processed += 1
@@ -1225,6 +1318,10 @@ class EnhancedTradingLoop:
     
     async def _process_symbol(self, symbol: str, result: TradingCycleResult):
         """Process a single symbol with parallel execution"""
+        if symbol in self._cooldowns and time.time() < self._cooldowns[symbol]:
+            return result
+        if self._has_open_position(symbol):
+            return result
         try:
             # Step 1: Fetch market data (initially without expected_return)
             market_data = await self._fetch_market_data(symbol, expected_return=0.0)
@@ -1246,7 +1343,7 @@ class EnhancedTradingLoop:
             )
             
             # Generate trading signals from belief state
-            trading_signal = self.signal_generator.generate_signal(self.belief_state, symbol)
+            trading_signal = self.signal_generator.generate_signal(self.belief_state, symbol, market_data)
             trading_signals = [trading_signal] if trading_signal else []
             
             # Log if signals were generated
@@ -1276,7 +1373,7 @@ class EnhancedTradingLoop:
                 
                 # [OPTIMIZATION] Regime Direction Filter - Block SELL in RECOVERY (10.9% WR vs 29.8% for BUY)
                 if getattr(self.config, 'regime_direction_filter', False) and regime == RegimeType.RECOVERY:
-                    if signal and signal.side == 'SELL':
+                    if trading_signals and trading_signals[0] and trading_signals[0].side == 'SELL':
                         self.logger.warning(f"{symbol}: Blocking SELL in RECOVERY regime (10.9% WR)")
                         return result
                         
@@ -1396,14 +1493,16 @@ class EnhancedTradingLoop:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    bid_price = float(data.get("bidPrice", 0))
+                    ask_price = float(data.get("askPrice", 0))
                     return {
                         "symbol": symbol,
-                        "bid_price": float(data.get("bidPrice", 0)),
-                        "ask_price": float(data.get("askPrice", 0)),
+                        "bid_price": bid_price,
+                        "ask_price": ask_price,
                         "bid_size": float(data.get("bidQty", 0)),
                         "ask_size": float(data.get("askQty", 0)),
-                        "last_price": 0.0,
-                        "last_size": 0.0,
+                        "last_price": (bid_price + ask_price) / 2,
+                        "last_size": float(data.get("bidQty", 0)) + float(data.get("askQty", 0)),
                     }
                 else:
                         self.logger.warning(f"Failed to fetch market data for {symbol}: HTTP {resp.status}")
@@ -1677,6 +1776,7 @@ class EnhancedTradingLoop:
                     
                     # Record trade in journal
                     trade_id = f"trade_{int(time.time() * 1000)}"
+                    entry_fee = filled_qty * avg_price * self.TAKER_FEE_RATE
                     self.journal.record_entry(
                         trade_id=trade_id,
                         symbol=signal.symbol,
@@ -1685,7 +1785,7 @@ class EnhancedTradingLoop:
                         entry_price=avg_price,
                         predicted_return=getattr(signal, 'expected_return', 0.0),
                         uncertainty=getattr(signal, 'uncertainty', 0.0),
-                        metadata={'confidence': signal.confidence, 'cycle': self._cycle_count, 'binance_order_id': binance_result.get('orderId'), 'binance_status': order_status}
+                        metadata={'confidence': signal.confidence, 'cycle': self._cycle_count, 'binance_order_id': binance_result.get('orderId'), 'binance_status': order_status, 'entry_fee': entry_fee}
                     )
                     
                     # PHASE 2.2: Track open position for time-based exit monitoring
@@ -1790,6 +1890,17 @@ class EnhancedTradingLoop:
                                 'binance_position': True,
                                 'status': 'OPEN'
                             }
+                            # Record entry in journal so exits can find this trade_id
+                            self.journal.record_entry(
+                                trade_id=trade_id,
+                                symbol=symbol,
+                                side=side,
+                                quantity=quantity,
+                                entry_price=entry_price,
+                                predicted_return=0.0,
+                                uncertainty=0.0,
+                                metadata={'source': 'binance_reload', 'binance_position': True}
+                            )
                             self.logger.info(f"Loaded position: {symbol} {side} {quantity} @ {entry_price}")
                     
                     self.logger.info(f"✅ Loaded {len(self._open_positions)} open positions from Binance")
@@ -1914,7 +2025,7 @@ def create_testnet_trading_loop() -> EnhancedTradingLoop:
         symbols=["BTC/USDT", "ETH/USDT", "BNB/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "MATIC/USDT", "SOL/USDT", "DOT/USDT", "AVAX/USDT", "LINK/USDT", "UNI/USDT", "LTC/USDT", "BCH/USDT", "ATOM/USDT", "ETC/USDT", "XLM/USDT", "ALGO/USDT", "VET/USDT", "FIL/USDT"],
         cycle_interval=10.0,
         max_position_size=0.15,
-        max_daily_loss=15000.0,
+        max_daily_loss=3.0,
         max_orders_per_minute=30,
         min_confidence_threshold=0.2,
         min_expected_return=0.003,

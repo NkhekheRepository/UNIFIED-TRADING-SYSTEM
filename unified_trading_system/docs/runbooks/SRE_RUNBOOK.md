@@ -183,8 +183,8 @@ tail -5 logs/final.log | grep "Using crossWalletBalance"
 # 1. Verify .env has correct values
 grep TELEGRAM .env
 # Expected:
-# TELEGRAM_BOT_TOKEN=8668023431:AAFJl08NZTtpkpfSjfjVbKvLkPeFwRbVxCE
-# TELEGRAM_CHAT_IDS=7361240735
+# TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+# TELEGRAM_CHAT_IDS=your_telegram_chat_id_here
 
 # 2. Verify bot is active
 # Message @BotFather → /mybots → Check bot status

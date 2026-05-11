@@ -31,10 +31,13 @@ scoring.log
 *.journal.json
 *.bak
 *.bak*
+*.out
+logs/
 
 # PID files
 *.pid
 trading.pid
+.pids/
 
 # Environment files - NEVER commit
 .env
@@ -46,6 +49,14 @@ trading.pid
 backup/
 backtesting/
 backtracking/
+crashes/
+
+# System files
+*.service
+*.pid
+.cycle_count
+unrealized_pnl.txt
+performance_report.txt
 
 # Large data files
 *.csv
